@@ -1,9 +1,12 @@
 name: Sync BakaSU CI Builds
 
+# 只同步应用：下载上游 Manager-release 产物（release APK 全家桶）发布到 Releases，
+# ksud / lkm(.ko) / ksuinit / mappings / Spoofed-Manager 等其他产物一律不要。
+
 on:
   schedule:
     - cron: '0 */3 * * *'
-  workflow_dispatch: 
+  workflow_dispatch:
 
 env:
   # 可以在这里手动设置需要检查的最新 N 条 Action 数量
@@ -26,121 +29,87 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Starting to fetch latest $N_LATEST_RUNS runs from $TARGET_REPO..."
-          
-          runs_json=$(gh api "repos/$TARGET_REPO/actions/runs?branch=main&per_page=$N_LATEST_RUNS" -q '[.workflow_runs[] | select(.event != "pull_request")] | reverse | .[] | {id: .id, title: .display_title, url: .html_url}')
-          
-          echo "$runs_json" | jq -c '.' | while read -r run; do
+
+          runs_json=$(gh api "repos/$TARGET_REPO/actions/runs?branch=main&per_page=$N_LATEST_RUNS" \
+            | jq -c '[.workflow_runs[] | select(.event != "pull_request")] | reverse | .[] | {id: .id, title: .display_title, url: .html_url}')
+
+          echo "$runs_json" | while read -r run; do
               run_id=$(echo "$run" | jq -r '.id')
               run_title=$(echo "$run" | jq -r '.title')
               run_url=$(echo "$run" | jq -r '.url')
               # 注意：tag 前缀沿用 ReSukiSU_，改动会导致已发布的 release 无法去重而被重复发版
               tag_name="ReSukiSU_${run_id}"
-              
+
               echo "----------------------------------------"
               echo "Checking run ID: $run_id (Title: $run_title)"
-              
+
               # 检查此前是否发布过该 tag 的 release
               if gh release view "$tag_name" >/dev/null 2>&1; then
                   echo "⚠️ Release with tag $tag_name already exists. Skipping."
                   continue
               fi
-              
-              # 获取该 run 的所有工件列表
-              artifacts_json=$(gh api repos/$TARGET_REPO/actions/runs/$run_id/artifacts)
-              
-              # 1. 确认是否包含名为 Manager-release 的工件
-              if echo "$artifacts_json" | jq -e '.artifacts[] | select(.name == "Manager-release")' > /dev/null; then
-                  echo "✅ Found Manager-release. Proceeding to download artifacts..."
-                  
-                  # 创建以 action ID 命名的文件夹并进入
-                  mkdir -p "$run_id"
-                  cd "$run_id"
-                  
-                  # 下载该 action 下的所有工件
-                  echo "$artifacts_json" | jq -c '.artifacts[]' | while read -r artifact; do
-                      art_id=$(echo "$artifact" | jq -r '.id')
-                      art_name=$(echo "$artifact" | jq -r '.name')
-                      echo "   -> Downloading $art_name.zip..."
-                      gh api repos/$TARGET_REPO/actions/artifacts/$art_id/zip > "${art_name}.zip"
-                  done
-                  
-                  # 解包所有压缩包到当前文件夹，并删除原始 zip 包
-                  for zip_file in *.zip; do
-                      if [ -f "$zip_file" ]; then
-                          # 检查是否是需要跳过的压缩包
-                          if [[ "$zip_file" == ksud-*.zip ]] || [[ "$zip_file" == ksuinit.zip ]] || [[ "$zip_file" == Spoofed-*.zip ]]; then
-                              echo "   -> 🗑️ Skipping extract $zip_file"
-                              continue
-                          fi
-                          echo "   -> 📦 Extracting $zip_file"
-                          unzip -q -o "$zip_file"
-                          rm "$zip_file"
-                      fi
-                  done
-                  
-                  # 将 apk 移动到工件根目录，并清理 ./apk 目录
-                  if [ -d "apk/release" ]; then
-                      find apk/release -name "*.apk" -exec mv {} . \;
-                  fi
-                  if [ -d "apk/debug" ]; then
-                      find apk/debug -name "*.apk" -exec mv {} . \;
-                  fi
-                  if [ -d "apk" ]; then
-                      rm -rf apk
-                  fi
-                  
-                  # 打包所有 .ko 文件为 lkm-all.zip，并删除原文件
-                  # 使用数组收集 .ko 文件，避免在没有 .ko 文件时报错
-                  ko_files=(*.ko)
-                  if [ ${#ko_files[@]} -gt 0 ] && [ "${ko_files[0]}" != "*.ko" ]; then
-                      echo "   -> 🗜️ Zipping ${#ko_files[@]} .ko files into lkm-all.zip..."
-                      zip -q lkm-all.zip "${ko_files[@]}"
-                      echo "   -> 🗑️ Deleting original .ko files..."
-                      rm "${ko_files[@]}"
-                  else
-                      echo "   -> ℹ️ No .ko files found to zip."
-                  fi
-                  
-                  # 检索目标 apk 文件并提取五位版本号
-                  # 使用正则匹配形如 BakaSU_*_?????-*.apk 的文件（ReSukiSU 为改名前的旧命名）
-                  apk_file=$(find . -maxdepth 1 \( -name "BakaSU*_[0-9][0-9][0-9][0-9][0-9]-*.apk" -o -name "ReSukiSU*_[0-9][0-9][0-9][0-9][0-9]-*.apk" \) | head -n 1)
-                  
-                  if [ -n "$apk_file" ]; then
-                      # 提取连续的5位数字
-                      if [[ "$apk_file" =~ _([0-9]{5})-.*\.apk$ ]]; then
-                          five_digits="${BASH_REMATCH[1]}"
-                          release_name="v${five_digits}"
-                          
-                          echo "🎉 Preparing to publish release: $release_name with tag: $tag_name"
-                          
-                          # 将当前文件夹下的所有文件收集为 release 资产
-                          assets=()
-                          for file in *; do
-                              if [ -f "$file" ]; then
-                                  assets+=("$file")
-                              fi
-                          done
-                          
-                          # 发布 Release
-                          if [ ${#assets[@]} -gt 0 ]; then
-                              release_notes=$(printf "%s\n\n**原始 Action 链接:** %s" "$run_title" "$run_url")
-                              gh release create "$tag_name" "${assets[@]}" --title "$release_name" --notes "$release_notes"
-                              echo "✅ Release $release_name created successfully!"
-                          else
-                              echo "❌ No files found to release after cleanup."
-                          fi
-                      else
-                          echo "❌ Could not extract 5 digits from filename: $apk_file"
-                      fi
-                  else
-                      echo "❌ Required APK pattern (BakaSU_*_XXXXX-universal-release.apk) not found. Skipping release."
-                  fi
-                  
-                  # 退出文件夹并清理，以免影响下一个循环
-                  cd ..
-                  rm -rf "$run_id"
-              else
-                  echo "⏭️ No Manager-release artifact found in run $run_id. Skipping."
+
+              # 只认 Manager-release 产物（应用 APK；Manager-debug/Spoofed-Manager 等变体不要）。
+              # 必须 --paginate：上游一次 run 约 30 个产物，API 默认 30 条/页，目标会翻页漏查
+              manager_aid=$(gh api --paginate "repos/$TARGET_REPO/actions/runs/$run_id/artifacts?per_page=100" \
+                --jq '.artifacts[] | select(.name == "Manager-release" and (.expired | not)) | .id' | head -n 1)
+
+              if [ -z "$manager_aid" ]; then
+                  echo "⏭️ No (unexpired) Manager-release artifact found in run $run_id. Skipping."
+                  continue
               fi
+
+              echo "✅ Found Manager-release ($manager_aid). Downloading..."
+
+              # 创建以 action ID 命名的文件夹并进入
+              mkdir -p "$run_id"
+              cd "$run_id"
+
+              gh api "repos/$TARGET_REPO/actions/artifacts/$manager_aid/zip" > Manager-release.zip
+              unzip -q -o Manager-release.zip
+              rm -f Manager-release.zip
+
+              # 把所有 APK 挪到当前目录，其余产物文件一律丢弃
+              find . -type f -name "*.apk" -exec mv -f {} . \;
+              rm -rf apk
+
+              # 检索目标 apk 文件并提取五位版本号
+              # 使用正则匹配形如 BakaSU_*_?????-*.apk 的文件（ReSukiSU 为改名前的旧命名）
+              apk_file=$(find . -maxdepth 1 \( -name "BakaSU*_[0-9][0-9][0-9][0-9][0-9]-*.apk" -o -name "ReSukiSU*_[0-9][0-9][0-9][0-9][0-9]-*.apk" \) | head -n 1)
+
+              if [ -n "$apk_file" ]; then
+                  # 提取连续的5位数字
+                  if [[ "$apk_file" =~ _([0-9]{5})-.*\.apk$ ]]; then
+                      five_digits="${BASH_REMATCH[1]}"
+                      release_name="v${five_digits}"
+
+                      echo "🎉 Preparing to publish release: $release_name with tag: $tag_name"
+
+                      # 将当前文件夹下的所有 APK 收集为 release 资产
+                      assets=()
+                      for file in *.apk; do
+                          if [ -f "$file" ]; then
+                              assets+=("$file")
+                          fi
+                      done
+
+                      # 发布 Release
+                      if [ ${#assets[@]} -gt 0 ]; then
+                          release_notes=$(printf "%s\n\n**原始 Action 链接:** %s" "$run_title" "$run_url")
+                          gh release create "$tag_name" "${assets[@]}" --title "$release_name" --notes "$release_notes"
+                          echo "✅ Release $release_name created successfully!"
+                      else
+                          echo "❌ No APK found to release after cleanup."
+                      fi
+                  else
+                      echo "❌ Could not extract 5 digits from filename: $apk_file"
+                  fi
+              else
+                  echo "❌ Required APK pattern (BakaSU_*_XXXXX-*.apk) not found. Skipping release."
+              fi
+
+              # 退出文件夹并清理，以免影响下一个循环
+              cd ..
+              rm -rf "$run_id"
           done
           echo "All done!"
