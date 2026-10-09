@@ -59,8 +59,10 @@ jobs:
               fi
 
               # 只认名为 manager 的产物（完整版；manager-gradle 是不含 ksud 的半成品，不要）
-              art_id=$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/artifacts" \
-                | jq -r '.artifacts[] | select(.name == "manager" and (.expired | not)) | .id' | head -n 1)
+              # 注意必须 --paginate：上游一次 run 有 ~40 个产物，manager 有时翻到第二页
+              # （API 默认 30 条/页），曾因此漏发（run 37519209590）
+              art_id=$(gh api --paginate "repos/$TARGET_REPO/actions/runs/$run_id/artifacts?per_page=100" \
+                --jq '.artifacts[] | select(.name == "manager" and (.expired | not)) | .id' | head -n 1)
 
               if [ -z "$art_id" ]; then
                   echo "⏭️ No (unexpired) 'manager' artifact in this run. Skipping."
