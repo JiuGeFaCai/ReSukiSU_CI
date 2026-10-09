@@ -1,0 +1,95 @@
+name: Sync KowSU CI Builds
+
+# 自动同步 KOWX712/KernelSU（KowSU）Build Manager 的 manager 产物：
+# 完整版管理器 APK（内嵌 arm64/armv7/x86_64/riscv64 的 ksud），发布到本仓库 Releases。
+# 与 CI.yml（BakaSU 同步）互不影响：tag 前缀固定为 KowSU_，Release 标题取自 APK 文件名。
+
+on:
+  schedule:
+    - cron: '20 */3 * * *'
+  workflow_dispatch:
+
+env:
+  # 每次最多往回检查多少个上游 run（用于增量同步 + 首次回填少量历史）
+  N_LATEST_RUNS: 10
+  # 上游仓库 / 分支 / Build Manager workflow（.github/workflows/build-manager.yml 的 id）
+  TARGET_REPO: KOWX712/KernelSU
+  TARGET_BRANCH: master
+  TARGET_WORKFLOW_ID: 189547700
+
+jobs:
+  fetch-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch KowSU manager APK and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Checking latest $N_LATEST_RUNS runs of $TARGET_REPO (workflow $TARGET_WORKFLOW_ID, branch $TARGET_BRANCH)..."
+
+          runs_json=$(gh api "repos/$TARGET_REPO/actions/workflows/$TARGET_WORKFLOW_ID/runs?branch=$TARGET_BRANCH&per_page=$N_LATEST_RUNS" \
+            | jq -c '[.workflow_runs[] | select(.event != "pull_request" and .status == "completed")] | reverse | .[] | {id: .id, url: .html_url, sha: .head_sha, msg: ((.head_commit.message // "") | split("\n")[0])}')
+
+          if [ -z "$runs_json" ]; then
+              echo "No runs found. Nothing to do."
+              exit 0
+          fi
+
+          echo "$runs_json" | while read -r run; do
+              run_id=$(echo "$run" | jq -r '.id')
+              run_url=$(echo "$run" | jq -r '.url')
+              run_sha=$(echo "$run" | jq -r '.sha')
+              run_msg=$(echo "$run" | jq -r '.msg')
+
+              # 去重靠 tag：前缀改为别的值会导致已发布 release 被重复发版
+              tag_name="KowSU_${run_id}"
+
+              echo "----------------------------------------"
+              echo "Checking run ID: $run_id"
+
+              if gh release view "$tag_name" >/dev/null 2>&1; then
+                  echo "⚠️ Release with tag $tag_name already exists. Skipping."
+                  continue
+              fi
+
+              # 只认名为 manager 的产物（完整版；manager-gradle 是不含 ksud 的半成品，不要）
+              art_id=$(gh api "repos/$TARGET_REPO/actions/runs/$run_id/artifacts" \
+                | jq -r '.artifacts[] | select(.name == "manager" and (.expired | not)) | .id' | head -n 1)
+
+              if [ -z "$art_id" ]; then
+                  echo "⏭️ No (unexpired) 'manager' artifact in this run. Skipping."
+                  continue
+              fi
+
+              echo "✅ Found manager artifact $art_id. Downloading..."
+              workdir="work_$run_id"
+              mkdir -p "$workdir"
+              (
+                  cd "$workdir"
+                  gh api "repos/$TARGET_REPO/actions/artifacts/$art_id/zip" > manager.zip
+                  unzip -q -o manager.zip
+                  rm -f manager.zip
+
+                  apk_file=$(find . -maxdepth 1 -name "KowSU*_*-release.apk" | head -n 1)
+                  if [ -z "$apk_file" ]; then
+                      echo "❌ APK not found inside artifact. Skipping."
+                      exit 0
+                  fi
+
+                  release_title=$(basename "$apk_file" .apk | sed -E 's/^KowSU_v/KowSU v/; s/-release$//')
+                  notes=$(printf '从 KOWX712/KernelSU 的 Build Manager CI 构建自动同步（manager 完整版，内嵌 ksud）。\n\n- 上游 run：%s\n- commit：`%s`\n- 提交信息：%s\n' "$run_url" "$run_sha" "$run_msg")
+
+                  echo "🎉 Publishing release: $release_title (tag: $tag_name)"
+                  gh release create "$tag_name" "$apk_file" \
+                      --title "$release_title" \
+                      --notes "$notes" \
+                      --latest=false
+              )
+              rm -rf "$workdir"
+          done
