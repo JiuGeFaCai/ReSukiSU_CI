@@ -6,7 +6,7 @@ name: Sync KowSU CI Builds
 
 on:
   schedule:
-    - cron: '43 */6 * * *'
+    - cron: '43 */10 * * *'
   workflow_dispatch:
 
 concurrency:

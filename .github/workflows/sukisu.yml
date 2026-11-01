@@ -1,0 +1,38 @@
+name: Sync SukiSU-Ultra CI Builds
+
+# 同步 main 分支 Build Manager 的 Manager 完整版管理器 APK。
+# 使用 SukiSU_ 标签，并与 BakaSU 采用相同的定时计划。
+
+on:
+  schedule:
+    - cron: '17 */5 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: sync-sukisu
+  cancel-in-progress: false
+
+env:
+  N_LATEST_RUNS: 10
+  TARGET_REPO: SukiSU-Ultra/SukiSU-Ultra
+  TARGET_BRANCH: main
+  TARGET_WORKFLOW_ID: 152806636
+
+jobs:
+  fetch-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Test manager sync logic
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Fetch SukiSU-Ultra manager APK and publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/sync-sukisu.sh

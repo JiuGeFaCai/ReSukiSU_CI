@@ -64,7 +64,7 @@ class SyncKowSUTest(unittest.TestCase):
             if shutil.which(command) is None:
                 raise RuntimeError(f"Tests require {command}")
 
-    def run_sync(self, routes):
+    def run_sync(self, routes, *, script=".github/scripts/sync-kowsu.sh", env_overrides=None):
         with tempfile.TemporaryDirectory(prefix="kowsu-test-") as directory:
             root = Path(directory)
             (root / "bin").mkdir()
@@ -86,8 +86,9 @@ class SyncKowSUTest(unittest.TestCase):
                 "TARGET_WORKFLOW_ID": "123",
                 "N_LATEST_RUNS": "10",
             }
+            env.update(env_overrides or {})
             result = subprocess.run(
-                ["bash", str(ROOT / ".github/scripts/sync-kowsu.sh")],
+                ["bash", str(ROOT / script)],
                 cwd=root, env=env, text=True, capture_output=True, timeout=15,
             )
             state = json.loads(state_file.read_text())
